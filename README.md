@@ -122,6 +122,87 @@ Runs all monitors. Best used with a config file for complex setups.
 bun run defib.ts all --config ./defib.config.json
 ```
 
+### `defib dismiss`
+
+Suppress alerts for a specific process. Use this when you've investigated a process and decided it's fine.
+
+```bash
+bun run defib.ts dismiss 12345
+```
+
+The process will not be re-alerted until it exits and a new process takes its PID.
+
+## Action Modes
+
+defib has three action modes that control how it responds to issues:
+
+| Mode | Behavior |
+|------|----------|
+| `auto` | Execute the fix immediately |
+| `ask` | Print human-friendly guidance with commands to copy-paste |
+| `deny` | Alert only, no action or guidance |
+
+### Default Actions (Conservative)
+
+| Action | Default | Why |
+|--------|---------|-----|
+| `restartContainer` | auto | Containers are designed to restart safely |
+| `killRunaway` | auto | Only kills processes matching `safe-to-kill` patterns |
+| `killUnknown` | ask | Unknown processes need human review |
+| `killSwapHog` | ask | Swap remediation is invasive |
+| `restartForSwap` | ask | Service restarts need human review |
+
+### "Ask" Mode Output
+
+When an action is set to `ask`, defib prints detailed guidance instead of taking action:
+
+```
+============================================================
+🔴 ISSUE DETECTED: Runaway Process
+============================================================
+
+PID 12345 is using 95% CPU and has been running for 3.5 hours.
+Process: node /app/worker.js
+
+WHY THIS IS A PROBLEM:
+This process is consuming almost all available CPU, which slows down
+everything else on your system. After 3+ hours at this level, it's
+likely stuck in a loop rather than doing useful work.
+
+RECOMMENDED FIX:
+Kill the process. It will free up CPU immediately. If this is a managed
+service (PM2, systemd, Docker), it will auto-restart fresh.
+
+TO FIX, RUN:
+  kill 12345
+
+TO INVESTIGATE FIRST:
+  ps -p 12345 -o pid,pcpu,pmem,etime,args
+  cat /proc/12345/wchan 2>/dev/null
+  ls -la /proc/12345/fd 2>/dev/null | wc -l
+
+TO IGNORE THIS ALERT:
+  defib dismiss 12345
+============================================================
+```
+
+### Configuring Actions
+
+In your config file, add an `actions` section:
+
+```json
+{
+  "webhookUrl": "...",
+  "actions": {
+    "restartContainer": "auto",
+    "killRunaway": "auto",
+    "killUnknown": "deny",
+    "killSwapHog": "auto",
+    "restartForSwap": "ask"
+  }
+}
+```
+
 ## Configuration
 
 ### Config File

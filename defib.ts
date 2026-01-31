@@ -54,13 +54,34 @@ interface SystemConfig {
   };
 }
 
+// Action modes: auto (execute immediately), ask (show guidance), deny (alert only)
+type ActionMode = "auto" | "ask" | "deny";
+
+interface ActionConfig {
+  restartContainer: ActionMode;    // Restart unhealthy containers
+  killRunaway: ActionMode;         // Kill high-CPU processes (safe patterns)
+  killUnknown: ActionMode;         // Kill high-CPU processes (unknown)
+  killSwapHog: ActionMode;         // Kill processes when swap critical
+  restartForSwap: ActionMode;      // Restart compose when swap critical
+}
+
 interface Config {
   webhookUrl?: string;
   stateFile: string;
   container?: ContainerConfig;
   processes?: ProcessConfig;
   system?: SystemConfig;
+  actions?: Partial<ActionConfig>;
 }
+
+// Conservative defaults - only safe patterns auto-execute
+const DEFAULT_ACTIONS: ActionConfig = {
+  restartContainer: "auto",   // Containers are designed to restart
+  killRunaway: "auto",        // Only kills safe-to-kill patterns
+  killUnknown: "ask",         // Needs human review
+  killSwapHog: "ask",         // Needs human review
+  restartForSwap: "ask",      // Needs human review
+};
 
 interface WatchdogState {
   lastRestartTime: number | null;
@@ -132,6 +153,143 @@ function getIssueKey(issue: Issue): string {
   if (issue.type === "swap") return "swap_critical";
   if (issue.pid) return `${issue.type}:${issue.pid}`;
   return `${issue.type}:${issue.message}`;
+}
+
+// ============================================================================
+// Human-Friendly Guidance (for "ask" mode)
+// ============================================================================
+
+interface Guidance {
+  title: string;
+  problem: string;
+  why: string;
+  recommendation: string;
+  fixCommand: string;
+  investigateCommands: string[];
+  dismissCommand: string;
+}
+
+function generateGuidance(
+  type: "runaway" | "memory" | "swap" | "stuck" | "container",
+  details: {
+    pid?: string;
+    command?: string;
+    cpu?: number;
+    memoryMB?: number;
+    runtimeHours?: number;
+    swapPercent?: number;
+    healthUrl?: string;
+    composeDir?: string;
+    serviceName?: string;
+  }
+): Guidance {
+  const { pid, command, cpu, memoryMB, runtimeHours, swapPercent, healthUrl, composeDir, serviceName } = details;
+  const shortCommand = command?.substring(0, 60) || "unknown";
+
+  switch (type) {
+    case "runaway":
+      return {
+        title: "ISSUE DETECTED: Runaway Process",
+        problem: `PID ${pid} is using ${cpu?.toFixed(0)}% CPU and has been running for ${runtimeHours?.toFixed(1)} hours.\nProcess: ${shortCommand}`,
+        why: `This process is consuming almost all available CPU, which slows down everything else on your system. After ${runtimeHours?.toFixed(0)}+ hours at this level, it's likely stuck in a loop rather than doing useful work.`,
+        recommendation: `Kill the process. It will free up CPU immediately. If this is a managed service (PM2, systemd, Docker), it will auto-restart fresh.`,
+        fixCommand: `kill ${pid}`,
+        investigateCommands: [
+          `ps -p ${pid} -o pid,pcpu,pmem,etime,args`,
+          `cat /proc/${pid}/wchan 2>/dev/null`,
+          `ls -la /proc/${pid}/fd 2>/dev/null | wc -l`,
+        ],
+        dismissCommand: `defib dismiss ${pid}`,
+      };
+
+    case "memory":
+      return {
+        title: "ISSUE DETECTED: High Memory Process",
+        problem: `PID ${pid} is using ${memoryMB?.toFixed(0)}MB of memory.\nProcess: ${shortCommand}`,
+        why: `This process is consuming a large amount of RAM, which can cause swap pressure and slow down your entire system. If it continues growing, the system may become unresponsive.`,
+        recommendation: `If this is unexpected memory usage, kill the process. If it's normal for this application, consider adding it to the ignore list.`,
+        fixCommand: `kill ${pid}`,
+        investigateCommands: [
+          `ps -p ${pid} -o pid,rss,vsz,pmem,args`,
+          `cat /proc/${pid}/status | grep -E "VmRSS|VmSwap"`,
+        ],
+        dismissCommand: `defib dismiss ${pid}`,
+      };
+
+    case "swap":
+      return {
+        title: "ISSUE DETECTED: Critical Swap Pressure",
+        problem: `Swap usage is at ${swapPercent?.toFixed(1)}%, which is critically high.`,
+        why: `When swap usage is this high, your system is running out of physical memory and is heavily using disk as virtual memory. This makes everything extremely slow and can cause applications to crash or the system to freeze entirely.`,
+        recommendation: `Identify and kill memory-hungry processes that aren't essential, or restart services known to have memory leaks. This will free up RAM and reduce swap usage.`,
+        fixCommand: `# Find top memory consumers:\nps aux --sort=-%mem | head -20`,
+        investigateCommands: [
+          `free -h`,
+          `ps aux --sort=-%mem | head -10`,
+          `cat /proc/meminfo | grep -E "MemFree|SwapFree|Cached"`,
+        ],
+        dismissCommand: `# Swap alerts auto-clear when usage drops below threshold`,
+      };
+
+    case "stuck":
+      return {
+        title: "ISSUE DETECTED: Stuck Process (D-state)",
+        problem: `PID ${pid} is stuck in uninterruptible sleep (D-state).\nProcess: ${shortCommand}`,
+        why: `D-state means the process is waiting on I/O (usually disk) and cannot be interrupted. This is sometimes normal (heavy disk activity), but if it persists for a long time, it usually indicates a problem like a failed disk, NFS hang, or kernel issue.`,
+        recommendation: `First investigate what it's waiting on. If it's been stuck for a long time with no I/O activity, the underlying cause needs to be addressed. Killing D-state processes usually doesn't work - they're unkillable until the I/O completes.`,
+        fixCommand: `# D-state processes are typically unkillable. Check the underlying issue first.`,
+        investigateCommands: [
+          `cat /proc/${pid}/wchan 2>/dev/null`,
+          `cat /proc/${pid}/io 2>/dev/null`,
+          `dmesg | tail -50 | grep -i -E "error|fail|timeout"`,
+        ],
+        dismissCommand: `defib dismiss ${pid}`,
+      };
+
+    case "container":
+      return {
+        title: "ISSUE DETECTED: Unhealthy Container",
+        problem: `Container health check failed.\nHealth URL: ${healthUrl}`,
+        why: `The container is not responding to health checks, which means the service inside is either crashed, hung, or overloaded. Users or dependent services may be affected.`,
+        recommendation: `Restart the container. Docker/Podman Compose will bring it back up with a fresh state. If this happens repeatedly, check the application logs for the root cause.`,
+        fixCommand: serviceName
+          ? `cd ${composeDir} && docker-compose restart ${serviceName}`
+          : `cd ${composeDir} && docker-compose down && docker-compose up -d`,
+        investigateCommands: [
+          `curl -v ${healthUrl}`,
+          `cd ${composeDir} && docker-compose logs --tail=50`,
+          `cd ${composeDir} && docker-compose ps`,
+        ],
+        dismissCommand: `# Container alerts auto-clear when health check passes`,
+      };
+  }
+}
+
+function printGuidance(guidance: Guidance): void {
+  console.log(`\n${"=".repeat(60)}`);
+  console.log(`🔴 ${guidance.title}`);
+  console.log(`${"=".repeat(60)}\n`);
+
+  console.log(`${guidance.problem}\n`);
+
+  console.log(`WHY THIS IS A PROBLEM:`);
+  console.log(`${guidance.why}\n`);
+
+  console.log(`RECOMMENDED FIX:`);
+  console.log(`${guidance.recommendation}\n`);
+
+  console.log(`TO FIX, RUN:`);
+  console.log(`  ${guidance.fixCommand}\n`);
+
+  console.log(`TO INVESTIGATE FIRST:`);
+  for (const cmd of guidance.investigateCommands) {
+    console.log(`  ${cmd}`);
+  }
+  console.log();
+
+  console.log(`TO IGNORE THIS ALERT:`);
+  console.log(`  ${guidance.dismissCommand}`);
+  console.log(`${"=".repeat(60)}\n`);
 }
 
 // ============================================================================
@@ -362,7 +520,8 @@ async function getProcessList(): Promise<ProcessInfo[]> {
 async function monitorProcesses(
   config: ProcessConfig,
   webhookUrl: string | undefined,
-  state: WatchdogState
+  state: WatchdogState,
+  actions: ActionConfig = DEFAULT_ACTIONS
 ): Promise<Issue[]> {
   const issues: Issue[] = [];
   const processes = await getProcessList();
@@ -374,11 +533,23 @@ async function monitorProcesses(
     // Check for runaway CPU
     if (proc.cpu > config.cpuThreshold && proc.runtimeHours > config.maxRuntimeHours) {
       const safeToKill = config.safeToKillPatterns.some(p => proc.command.includes(p));
+      const actionMode = safeToKill ? actions.killRunaway : actions.killUnknown;
       let killed = false;
 
-      if (safeToKill) {
+      // Determine action based on mode
+      if (actionMode === "auto" && safeToKill) {
         killed = killProcess(proc.pid, proc.command);
+      } else if (actionMode === "ask") {
+        // Print human-friendly guidance
+        const guidance = generateGuidance("runaway", {
+          pid: proc.pid,
+          command: proc.command,
+          cpu: proc.cpu,
+          runtimeHours: proc.runtimeHours,
+        });
+        printGuidance(guidance);
       }
+      // "deny" mode: just alert, no action or guidance
 
       const issue: Issue = {
         type: "runaway",
@@ -401,7 +572,8 @@ async function monitorProcesses(
             "Runaway Process Killed",
             `**PID:** ${proc.pid}\n**CPU:** ${proc.cpu}%\n**Runtime:** ${proc.runtimeHours.toFixed(1)}h\n\`${proc.command.substring(0, 100)}\``
           );
-        } else {
+        } else if (actionMode !== "ask") {
+          // Only send notification if not in ask mode (ask mode prints to console)
           await sendNotification(
             webhookUrl,
             "Runaway Process Detected",
@@ -427,11 +599,22 @@ async function monitorProcesses(
         state.knownIssues[key] = Date.now();
         issues.push(issue);
 
-        await sendNotification(
-          webhookUrl,
-          "High Memory Process",
-          `**PID:** ${proc.pid}\n**Memory:** ${proc.memoryMB.toFixed(0)}MB\n**Runtime:** ${proc.runtimeHours.toFixed(1)}h\n\`${proc.command.substring(0, 100)}\``
-        );
+        // Memory issues always get guidance in ask mode
+        if (actions.killUnknown === "ask") {
+          const guidance = generateGuidance("memory", {
+            pid: proc.pid,
+            command: proc.command,
+            memoryMB: proc.memoryMB,
+            runtimeHours: proc.runtimeHours,
+          });
+          printGuidance(guidance);
+        } else {
+          await sendNotification(
+            webhookUrl,
+            "High Memory Process",
+            `**PID:** ${proc.pid}\n**Memory:** ${proc.memoryMB.toFixed(0)}MB\n**Runtime:** ${proc.runtimeHours.toFixed(1)}h\n\`${proc.command.substring(0, 100)}\``
+          );
+        }
       }
     }
   }
@@ -616,12 +799,14 @@ Usage:
   defib processes [options]
   defib system [options]
   defib all --config <file>
+  defib dismiss <pid>     Suppress alerts for a specific process
 
 Commands:
   container   Monitor container health via HTTP endpoint, auto-restart if unhealthy
   processes   Monitor for runaway processes (high CPU/memory), auto-kill if safe
   system      Monitor system health (swap pressure, stuck processes)
   all         Run all monitors (requires config file)
+  dismiss     Suppress future alerts for a PID (until it exits)
 
 Container Options:
   --health <url>         Health endpoint URL (required)
@@ -644,6 +829,16 @@ System Options:
   --swap-restart-dir <path>    Compose dir to restart when swap critical
   --swap-restart-service <n>   Specific service to restart (optional)
   --no-dstate                  Disable D-state monitoring
+
+Action Modes (in config file):
+  Actions can be set to: "auto" (execute), "ask" (show guidance), "deny" (alert only)
+
+  Default modes (conservative):
+    restartContainer: auto    - Containers are designed to restart
+    killRunaway: auto         - Only kills safe-to-kill patterns
+    killUnknown: ask          - Unknown processes need human review
+    killSwapHog: ask          - Swap remediation needs human review
+    restartForSwap: ask       - Restarting services needs human review
 
 Global Options:
   --webhook <url>        Discord/Slack webhook for notifications
@@ -712,6 +907,36 @@ async function main() {
   const state = await loadState(stateFile);
   const now = Date.now();
 
+  // Build action config from file config with defaults
+  const actions: ActionConfig = {
+    ...DEFAULT_ACTIONS,
+    ...fileConfig.actions,
+  };
+
+  // Handle dismiss command
+  if (command === "dismiss") {
+    const pid = restArgs[0];
+    if (!pid) {
+      console.error("Error: dismiss requires a PID argument");
+      console.error("Usage: defib dismiss <pid>");
+      process.exit(1);
+    }
+
+    // Add to known issues so it won't be re-alerted
+    const keys = [
+      `runaway:${pid}`,
+      `memory:${pid}`,
+      `stuck:${pid}`,
+    ];
+    for (const key of keys) {
+      state.knownIssues[key] = Date.now();
+    }
+    await saveState(stateFile, state);
+
+    console.log(`Dismissed alerts for PID ${pid}. Will not re-alert until process exits.`);
+    process.exit(0);
+  }
+
   console.log(`[${new Date().toISOString()}] defib ${command}`);
 
   let allIssues: Issue[] = [];
@@ -750,7 +975,7 @@ async function main() {
       safeToKillPatterns: values["safe-to-kill"] || fileConfig.processes?.safeToKillPatterns || [],
       ignorePatterns: values.ignore || fileConfig.processes?.ignorePatterns || [],
     };
-    const issues = await monitorProcesses(processConfig, webhookUrl, state);
+    const issues = await monitorProcesses(processConfig, webhookUrl, state, actions);
     allIssues = allIssues.concat(issues);
   }
 

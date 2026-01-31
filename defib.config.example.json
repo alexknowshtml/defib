@@ -1,6 +1,13 @@
 {
   "webhookUrl": "https://discord.com/api/webhooks/YOUR_WEBHOOK_HERE",
   "stateFile": "/tmp/defib-state.json",
+  "actions": {
+    "restartContainer": "auto",
+    "killRunaway": "auto",
+    "killUnknown": "ask",
+    "killSwapHog": "ask",
+    "restartForSwap": "ask"
+  },
   "container": {
     "healthUrl": "http://localhost:8000/health",
     "composeDir": "/path/to/your/app",
