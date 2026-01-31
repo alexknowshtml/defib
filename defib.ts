@@ -47,6 +47,11 @@ interface ProcessConfig {
 interface SystemConfig {
   swapThreshold: number;       // Swap % to alert
   checkDState: boolean;        // Monitor D-state processes
+  swapKillPatterns: string[];  // Processes to kill when swap critical
+  swapRestartCompose?: {       // Compose stack to restart when swap critical
+    composeDir: string;
+    serviceName?: string;
+  };
 }
 
 interface Config {
@@ -454,7 +459,8 @@ async function monitorProcesses(
 async function monitorSystem(
   config: SystemConfig,
   webhookUrl: string | undefined,
-  state: WatchdogState
+  state: WatchdogState,
+  containerRuntime?: "docker" | "podman"
 ): Promise<Issue[]> {
   const issues: Issue[] = [];
 
@@ -467,22 +473,69 @@ async function monitorSystem(
       const swapPercent = total > 0 ? (used / total) * 100 : 0;
 
       if (swapPercent > config.swapThreshold) {
+        const key = "swap_critical";
+        const isNewIssue = !state.knownIssues[key];
+
+        if (isNewIssue) {
+          state.knownIssues[key] = Date.now();
+        }
+
+        // Auto-remediation: kill matching processes
+        const killed: string[] = [];
+        if (config.swapKillPatterns.length > 0) {
+          const processes = await getProcessList();
+          for (const proc of processes) {
+            if (config.swapKillPatterns.some(p => proc.command.includes(p))) {
+              if (killProcess(proc.pid, proc.command)) {
+                killed.push(`PID ${proc.pid}: ${proc.command.substring(0, 50)}`);
+              }
+            }
+          }
+        }
+
+        // Auto-remediation: restart compose stack
+        let restarted = false;
+        if (config.swapRestartCompose && containerRuntime) {
+          const compose = containerRuntime === "docker" ? "docker-compose" : "podman-compose";
+          const { composeDir, serviceName } = config.swapRestartCompose;
+          console.log(`  Restarting ${serviceName || "stack"} to free memory...`);
+          try {
+            if (serviceName) {
+              await $`cd ${composeDir} && ${compose} restart ${serviceName}`.quiet();
+            } else {
+              await $`cd ${composeDir} && ${compose} down`.quiet();
+              await $`cd ${composeDir} && ${compose} up -d`.quiet();
+            }
+            restarted = true;
+          } catch (error) {
+            console.error(`  Failed to restart compose: ${error}`);
+          }
+        }
+
         const issue: Issue = {
           type: "swap",
           severity: "critical",
           message: `Swap usage: ${swapPercent.toFixed(1)}% (${used}MB / ${total}MB)`,
         };
+        issues.push(issue);
 
-        const key = getIssueKey(issue);
-        if (!state.knownIssues[key]) {
-          state.knownIssues[key] = Date.now();
-          issues.push(issue);
+        if (isNewIssue || killed.length > 0 || restarted) {
+          let remediation = "";
+          if (killed.length > 0) {
+            remediation += `\n\n**Auto-killed ${killed.length} process(es):**\n${killed.join("\n")}`;
+          }
+          if (restarted) {
+            remediation += `\n\n**Restarted:** ${config.swapRestartCompose?.serviceName || "compose stack"}`;
+          }
+          if (!killed.length && !restarted) {
+            remediation = "\n\n**No auto-remediation configured.** System may become unresponsive.";
+          }
 
           await sendNotification(
             webhookUrl,
-            "Swap Pressure Critical",
-            `**Usage:** ${swapPercent.toFixed(1)}%\n**Used:** ${used}MB / ${total}MB\n\n**System may become unresponsive.**`,
-            true
+            killed.length > 0 || restarted ? "Swap Critical - Auto-Remediated" : "Swap Pressure Critical",
+            `**Usage:** ${swapPercent.toFixed(1)}%\n**Used:** ${used}MB / ${total}MB${remediation}`,
+            !killed.length && !restarted
           );
         }
       } else if (state.knownIssues["swap_critical"]) {
@@ -586,8 +639,11 @@ Process Options:
   --ignore <pattern>        Process pattern to ignore (repeatable)
 
 System Options:
-  --swap-threshold <pct>    Swap % to alert (default: 80)
-  --no-dstate               Disable D-state monitoring
+  --swap-threshold <pct>       Swap % to trigger action (default: 80)
+  --swap-kill <pattern>        Process pattern to kill when swap critical (repeatable)
+  --swap-restart-dir <path>    Compose dir to restart when swap critical
+  --swap-restart-service <n>   Specific service to restart (optional)
+  --no-dstate                  Disable D-state monitoring
 
 Global Options:
   --webhook <url>        Discord/Slack webhook for notifications
@@ -633,6 +689,9 @@ async function main() {
       ignore: { type: "string", multiple: true },
       // System
       "swap-threshold": { type: "string" },
+      "swap-kill": { type: "string", multiple: true },
+      "swap-restart-dir": { type: "string" },
+      "swap-restart-service": { type: "string" },
       "no-dstate": { type: "boolean" },
     },
     allowPositionals: true,
@@ -696,11 +755,23 @@ async function main() {
   }
 
   if (command === "system" || command === "all") {
+    // Detect runtime for swap restart feature
+    let runtime: "docker" | "podman" | undefined;
+    const swapRestartDir = values["swap-restart-dir"] || fileConfig.system?.swapRestartCompose?.composeDir;
+    if (swapRestartDir) {
+      runtime = await detectRuntime();
+    }
+
     const systemConfig: SystemConfig = {
       swapThreshold: parseInt(values["swap-threshold"] || "") || fileConfig.system?.swapThreshold || 80,
       checkDState: !values["no-dstate"] && (fileConfig.system?.checkDState !== false),
+      swapKillPatterns: values["swap-kill"] || fileConfig.system?.swapKillPatterns || [],
+      swapRestartCompose: swapRestartDir ? {
+        composeDir: swapRestartDir,
+        serviceName: values["swap-restart-service"] || fileConfig.system?.swapRestartCompose?.serviceName,
+      } : undefined,
     };
-    const issues = await monitorSystem(systemConfig, webhookUrl, state);
+    const issues = await monitorSystem(systemConfig, webhookUrl, state, runtime);
     allIssues = allIssues.concat(issues);
   }
 

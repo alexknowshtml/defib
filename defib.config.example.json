@@ -18,6 +18,8 @@
   },
   "system": {
     "swapThreshold": 80,
-    "checkDState": true
+    "checkDState": true,
+    "swapKillPatterns": [],
+    "swapRestartCompose": null
   }
 }
