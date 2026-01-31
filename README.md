@@ -8,6 +8,10 @@ Works with **Docker** or **Podman** (auto-detects).
 
 > ⚠️ **Safety First**: defib kills processes and restarts services. Don't run as root. Don't use on multi-user systems. Test patterns before enabling auto-kill. [Full security guide →](#security-considerations)
 
+### Example: Discord notification when defib auto-handles a swap pressure event
+
+![Discord notification showing defib auto-handling a swap pressure event](docs/discord-notification-example.png)
+
 ## What It Does
 
 defib has three monitoring commands, each targeting a different failure mode:
