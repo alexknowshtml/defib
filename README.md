@@ -1,16 +1,17 @@
 # defib 🫀
 
-Container defibrillator - monitors health endpoints and auto-restarts unresponsive containers.
+System defibrillator - monitors health and auto-recovers from common failure modes.
 
-Works with **Docker** or **Podman** (auto-detects which is available).
+Works with **Docker** or **Podman** (auto-detects).
 
-## Features
+## What It Monitors
 
-- **Health monitoring** - HTTP endpoint checks with configurable timeout
-- **Auto-restart** - Brings containers back to life via docker-compose/podman-compose
-- **Anti-thrash** - Backoff period prevents restart loops
-- **Notifications** - Discord/Slack webhook support
-- **State persistence** - Tracks restart history across runs
+| Mode | Detects | Auto-Recovery |
+|------|---------|---------------|
+| `container` | Unresponsive HTTP endpoints | Restarts via docker-compose |
+| `processes` | High CPU, memory hogs | Kills safe-to-kill processes |
+| `system` | Swap pressure, stuck processes (D-state) | Alerts only |
+| `all` | Everything above | All of the above |
 
 ## Installation
 
@@ -21,63 +22,127 @@ curl -fsSL https://bun.sh/install | bash
 # Clone and run
 git clone https://github.com/alexknowshtml/defib.git
 cd defib
-bun install
 ```
 
-## Usage
-
-### CLI
+## Quick Start
 
 ```bash
-# Basic usage
-bun run defib.ts --health http://localhost:8000/health --compose-dir ./my-app
+# Monitor a container
+bun run defib.ts container --health http://localhost:8000/health --compose-dir ./my-app
 
-# With notifications
-bun run defib.ts \
+# Monitor processes
+bun run defib.ts processes
+
+# Monitor system health
+bun run defib.ts system
+
+# Monitor everything (use config file)
+bun run defib.ts all --config ./defib.config.json
+```
+
+## Commands
+
+### `defib container`
+
+Monitors container health via HTTP endpoint, auto-restarts if unhealthy.
+
+```bash
+bun run defib.ts container \
   --health http://localhost:8000/health \
   --compose-dir ./my-app \
-  --webhook https://discord.com/api/webhooks/...
-
-# All options
-bun run defib.ts \
-  --health http://localhost:8000/health \
-  --compose-dir ./my-app \
-  --webhook https://discord.com/api/webhooks/... \
   --timeout 10 \
   --max-response 15 \
   --backoff 10 \
-  --service my-service
+  --service web
 ```
+
+**Options:**
+- `--health <url>` - Health endpoint URL (required)
+- `--compose-dir <path>` - Directory with docker-compose.yml (required)
+- `--timeout <sec>` - Health check timeout (default: 10)
+- `--max-response <sec>` - Max acceptable response time (default: 15)
+- `--backoff <min>` - Minutes between restart attempts (default: 10)
+- `--service <name>` - Specific service to restart
+
+### `defib processes`
+
+Monitors for runaway processes (high CPU/memory), auto-kills if safe.
+
+```bash
+bun run defib.ts processes \
+  --cpu-threshold 80 \
+  --memory-threshold 2000 \
+  --max-runtime 2 \
+  --safe-to-kill "node mcp-" \
+  --ignore "postgres" \
+  --ignore "ollama"
+```
+
+**Options:**
+- `--cpu-threshold <pct>` - CPU % to flag as runaway (default: 80)
+- `--memory-threshold <mb>` - Memory MB to flag (default: 2000)
+- `--max-runtime <hours>` - Hours before flagging high-CPU process (default: 2)
+- `--safe-to-kill <pattern>` - Process pattern safe to auto-kill (repeatable)
+- `--ignore <pattern>` - Process pattern to ignore (repeatable)
+
+### `defib system`
+
+Monitors system health (swap pressure, stuck processes).
+
+```bash
+bun run defib.ts system \
+  --swap-threshold 80 \
+  --no-dstate
+```
+
+**Options:**
+- `--swap-threshold <pct>` - Swap % to alert (default: 80)
+- `--no-dstate` - Disable D-state (stuck process) monitoring
+
+### `defib all`
+
+Runs all monitors. Best used with a config file.
+
+```bash
+bun run defib.ts all --config ./defib.config.json
+```
+
+## Configuration
 
 ### Config File
 
-```bash
-bun run defib.ts --config ./defib.config.json
-```
-
 ```json
 {
-  "healthUrl": "http://localhost:8000/health",
-  "composeDir": "/path/to/app",
   "webhookUrl": "https://discord.com/api/webhooks/...",
-  "timeoutSeconds": 10,
-  "maxResponseSeconds": 15,
-  "backoffMinutes": 10,
-  "serviceName": "web"
+  "stateFile": "/tmp/defib-state.json",
+  "container": {
+    "healthUrl": "http://localhost:8000/health",
+    "composeDir": "/path/to/app",
+    "timeoutSeconds": 10,
+    "maxResponseSeconds": 15,
+    "backoffMinutes": 10,
+    "serviceName": "web"
+  },
+  "processes": {
+    "cpuThreshold": 80,
+    "memoryThresholdMB": 2000,
+    "maxRuntimeHours": 2,
+    "safeToKillPatterns": ["mcp-", "node.*watchdog"],
+    "ignorePatterns": ["postgres", "ollama", "code-server"]
+  },
+  "system": {
+    "swapThreshold": 80,
+    "checkDState": true
+  }
 }
 ```
 
 ### Environment Variables
 
 ```bash
+export DEFIB_WEBHOOK_URL=https://discord.com/api/webhooks/...
 export DEFIB_HEALTH_URL=http://localhost:8000/health
 export DEFIB_COMPOSE_DIR=/path/to/app
-export DEFIB_WEBHOOK_URL=https://discord.com/api/webhooks/...
-export DEFIB_TIMEOUT=10
-export DEFIB_MAX_RESPONSE=15
-export DEFIB_BACKOFF=10
-
-bun run defib.ts
 ```
 
 ## Running on a Schedule
@@ -85,14 +150,21 @@ bun run defib.ts
 ### With cron
 
 ```bash
-# Check every 2 minutes
-*/2 * * * * /path/to/bun /path/to/defib.ts --config /path/to/config.json
+# Check containers every 2 minutes
+*/2 * * * * /path/to/bun /path/to/defib.ts container --health http://localhost:8000/health --compose-dir /app
+
+# Check processes every 15 minutes
+*/15 * * * * /path/to/bun /path/to/defib.ts processes
+
+# Full health check every 5 minutes
+*/5 * * * * /path/to/bun /path/to/defib.ts all --config /etc/defib/config.json
 ```
 
 ### With PM2
 
 ```bash
-pm2 start defib.ts --name defib --cron "*/2 * * * *" --no-autorestart
+pm2 start defib.ts --name defib-container --cron "*/2 * * * *" --no-autorestart -- container --health http://localhost:8000/health --compose-dir /app
+pm2 start defib.ts --name defib-processes --cron "*/15 * * * *" --no-autorestart -- processes
 ```
 
 ### With systemd timer
@@ -112,31 +184,43 @@ WantedBy=timers.target
 
 ## How It Works
 
-1. **Check health** - HTTP GET to your health endpoint
-2. **Evaluate** - Healthy if 2xx response within timeout
-3. **Restart if unhealthy** - `docker-compose down && docker-compose up -d`
-4. **Verify** - Re-check health after restart
-5. **Notify** - Send webhook on restart (success or failure)
-6. **Backoff** - Wait N minutes before allowing another restart
+### Container Monitoring
+1. HTTP GET to health endpoint
+2. If unhealthy → `docker-compose down && docker-compose up -d`
+3. Verify health after restart
+4. Enter backoff period to prevent thrashing
 
-### Anti-Thrash Protection
+### Process Monitoring
+1. Parse `ps` output for CPU, memory, runtime
+2. Flag processes exceeding thresholds
+3. Auto-kill if matches `safe-to-kill` pattern
+4. Track known issues to avoid duplicate alerts
 
-If your container keeps crashing, defib won't hammer it with restarts. After each restart attempt, it enters a backoff period (default: 10 minutes) before trying again.
+### System Monitoring
+1. Check swap usage via `free -m`
+2. Check for D-state processes via `ps`
+3. Skip kernel threads and short D-states
+4. Alert on resolution when issues clear
 
-State is persisted to `/tmp/defib-*.json` so backoff survives process restarts.
+## Notifications
 
-## Options
+Supports Discord and Slack webhooks. Notifications include:
 
-| Flag | Env Var | Default | Description |
-|------|---------|---------|-------------|
-| `--health` | `DEFIB_HEALTH_URL` | required | Health endpoint URL |
-| `--compose-dir` | `DEFIB_COMPOSE_DIR` | required | docker-compose.yml location |
-| `--webhook` | `DEFIB_WEBHOOK_URL` | - | Notification webhook URL |
-| `--timeout` | `DEFIB_TIMEOUT` | 10 | Health check timeout (seconds) |
-| `--max-response` | `DEFIB_MAX_RESPONSE` | 15 | Max acceptable response time |
-| `--backoff` | `DEFIB_BACKOFF` | 10 | Minutes between restart attempts |
-| `--service` | - | - | Specific service to restart |
-| `--config` | - | - | Path to config JSON file |
+- **Container Restarted** - Service was down, now recovered
+- **Container Restart FAILED** - Manual intervention needed
+- **Runaway Process Killed** - Auto-killed a safe process
+- **Runaway Process Detected** - High CPU, needs attention
+- **High Memory Process** - Memory hog detected
+- **Swap Pressure Critical** - System may become unresponsive
+- **Stuck Process Detected** - Process in D-state
+
+## State Persistence
+
+defib maintains state in `/tmp/defib-state.json` (configurable):
+
+- Tracks restart backoff timers
+- Remembers known issues to avoid duplicate alerts
+- Cleans up resolved issues automatically
 
 ## License
 

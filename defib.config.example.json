@@ -1,9 +1,23 @@
 {
-  "healthUrl": "http://localhost:8000/health",
-  "composeDir": "/path/to/your/app",
   "webhookUrl": "https://discord.com/api/webhooks/YOUR_WEBHOOK_HERE",
-  "timeoutSeconds": 10,
-  "maxResponseSeconds": 15,
-  "backoffMinutes": 10,
-  "serviceName": null
+  "stateFile": "/tmp/defib-state.json",
+  "container": {
+    "healthUrl": "http://localhost:8000/health",
+    "composeDir": "/path/to/your/app",
+    "timeoutSeconds": 10,
+    "maxResponseSeconds": 15,
+    "backoffMinutes": 10,
+    "serviceName": null
+  },
+  "processes": {
+    "cpuThreshold": 80,
+    "memoryThresholdMB": 2000,
+    "maxRuntimeHours": 2,
+    "safeToKillPatterns": [],
+    "ignorePatterns": ["postgres", "ollama"]
+  },
+  "system": {
+    "swapThreshold": 80,
+    "checkDState": true
+  }
 }
