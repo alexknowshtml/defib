@@ -1,0 +1,25 @@
+# Simple HTTP server that becomes unhealthy after a delay
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Create inline server script
+RUN echo 'const http = require("http"); \
+let healthy = true; \
+setTimeout(() => { healthy = false; console.log("Going unhealthy..."); }, 10000); \
+http.createServer((req, res) => { \
+  if (req.url === "/health") { \
+    if (healthy) { \
+      res.writeHead(200); \
+      res.end("OK"); \
+    } else { \
+      res.writeHead(503); \
+      res.end("Service Unavailable"); \
+    } \
+  } else { \
+    res.writeHead(200); \
+    res.end("Hello"); \
+  } \
+}).listen(8080, () => console.log("Server on :8080, will go unhealthy in 10s"));' > server.js
+
+CMD ["node", "server.js"]

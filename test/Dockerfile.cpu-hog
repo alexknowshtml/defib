@@ -1,0 +1,12 @@
+# CPU-intensive process for testing process monitoring
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Create CPU spinner that identifies itself clearly
+RUN echo 'console.log("defib-test-cpu-hog starting..."); \
+console.log("PID:", process.pid); \
+let i = 0; \
+while (true) { i++; if (i % 100000000 === 0) console.log("Still spinning...", i); }' > cpu-hog.js
+
+CMD ["node", "cpu-hog.js"]
