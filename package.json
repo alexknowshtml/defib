@@ -1,0 +1,31 @@
+{
+  "name": "defib",
+  "version": "1.0.0",
+  "description": "Container defibrillator - monitors health endpoints and auto-restarts unresponsive containers",
+  "main": "defib.ts",
+  "bin": {
+    "defib": "./defib.ts"
+  },
+  "scripts": {
+    "start": "bun run defib.ts",
+    "check": "bun run defib.ts --help"
+  },
+  "keywords": [
+    "docker",
+    "podman",
+    "container",
+    "health-check",
+    "watchdog",
+    "monitoring",
+    "auto-restart"
+  ],
+  "author": "Alex Hillman",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alexknowshtml/defib.git"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  }
+}

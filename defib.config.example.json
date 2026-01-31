@@ -1,0 +1,9 @@
+{
+  "healthUrl": "http://localhost:8000/health",
+  "composeDir": "/path/to/your/app",
+  "webhookUrl": "https://discord.com/api/webhooks/YOUR_WEBHOOK_HERE",
+  "timeoutSeconds": 10,
+  "maxResponseSeconds": 15,
+  "backoffMinutes": 10,
+  "serviceName": null
+}
