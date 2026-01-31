@@ -10,12 +10,12 @@ Works with **Docker** or **Podman** (auto-detects).
 
 ## What It Does
 
-| Mode | Detects | Auto-Recovery |
-|------|---------|---------------|
-| `container` | Unresponsive HTTP endpoints | Restarts via docker-compose/podman-compose |
-| `processes` | High CPU/memory processes | Kills processes matching safe-to-kill patterns |
-| `system` | Swap pressure, stuck processes | Kills memory hogs, restarts services |
-| `all` | Everything above | All of the above |
+defib has three monitoring commands, each targeting a different failure mode:
+
+- **`defib container`** - Watches an HTTP health endpoint. If it stops responding, restarts the container via docker-compose/podman-compose.
+- **`defib processes`** - Scans for runaway processes (high CPU or memory). Auto-kills processes that match your safe-to-kill patterns.
+- **`defib system`** - Monitors swap pressure and stuck (D-state) processes. Can kill memory hogs or restart services to recover.
+- **`defib all`** - Runs all three. Best used with a config file.
 
 ## Installation
 
