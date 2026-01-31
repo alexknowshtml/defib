@@ -205,6 +205,56 @@ In your config file, add an `actions` section:
 }
 ```
 
+## AI-Enhanced Diagnosis
+
+When an action is set to `ask` mode, defib can optionally use an AI model to analyze the issue and provide tailored diagnosis instead of generic guidance.
+
+**This is completely optional.** Without AI configured, defib prints useful hardcoded guidance. AI adds context-specific analysis of why a process might be misbehaving and what to do about it.
+
+### Supported Providers
+
+| Provider | Cost | Setup |
+|----------|------|-------|
+| `none` | Free | Default. No AI, hardcoded guidance only. |
+| `ollama` | Free | Local. Install [Ollama](https://ollama.com), run `ollama pull llama3.1:8b` |
+| `anthropic` | Paid | API key from [console.anthropic.com](https://console.anthropic.com). Uses Claude Haiku. |
+| `openai` | Paid | API key from [platform.openai.com](https://platform.openai.com). Uses GPT-4o Mini. |
+
+### Usage
+
+```bash
+# Free local AI via Ollama
+bun run defib.ts processes --ai ollama --safe-to-kill "node /app/worker"
+
+# Anthropic (paid, most capable)
+bun run defib.ts processes --ai anthropic --ai-key sk-ant-... --safe-to-kill "node /app/worker"
+
+# Override the default model
+bun run defib.ts processes --ai ollama --ai-model mistral:7b
+```
+
+Or in your config file:
+
+```json
+{
+  "ai": {
+    "provider": "ollama",
+    "model": "llama3.1:8b",
+    "ollamaUrl": "http://localhost:11434"
+  }
+}
+```
+
+### Default Models
+
+| Provider | Default Model |
+|----------|---------------|
+| `anthropic` | `claude-haiku-4-20250414` |
+| `openai` | `gpt-4o-mini` |
+| `ollama` | `llama3.1:8b` |
+
+AI diagnosis only runs when an action is in `ask` mode. If all your actions are `auto` or `deny`, AI is never called even if configured.
+
 ## Configuration
 
 ### Config File
@@ -230,6 +280,11 @@ For complex setups, use a JSON config file:
     "safeToKillPatterns": ["mcp-", "node.*watchdog"],
     "ignorePatterns": ["postgres", "ollama", "code-server"]
   },
+  "ai": {
+    "provider": "ollama",
+    "model": "llama3.1:8b",
+    "ollamaUrl": "http://localhost:11434"
+  },
   "system": {
     "swapThreshold": 80,
     "checkDState": true,
@@ -248,6 +303,7 @@ For complex setups, use a JSON config file:
 export DEFIB_WEBHOOK_URL=https://discord.com/api/webhooks/...
 export DEFIB_HEALTH_URL=http://localhost:8000/health
 export DEFIB_COMPOSE_DIR=/path/to/app
+export DEFIB_AI_API_KEY=sk-...
 ```
 
 ## Running on a Schedule

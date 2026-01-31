@@ -23,6 +23,12 @@
     "safeToKillPatterns": [],
     "ignorePatterns": ["postgres", "ollama"]
   },
+  "ai": {
+    "provider": "none",
+    "apiKey": null,
+    "model": null,
+    "ollamaUrl": "http://localhost:11434"
+  },
   "system": {
     "swapThreshold": 80,
     "checkDState": true,

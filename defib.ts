@@ -65,6 +65,16 @@ interface ActionConfig {
   restartForSwap: ActionMode;      // Restart compose when swap critical
 }
 
+// AI provider for enhanced diagnosis (optional)
+type AIProvider = "none" | "anthropic" | "openai" | "ollama";
+
+interface AIConfig {
+  provider: AIProvider;
+  apiKey?: string;          // For anthropic/openai
+  model?: string;           // Model override (default: provider-specific)
+  ollamaUrl?: string;       // For ollama (default: http://localhost:11434)
+}
+
 interface Config {
   webhookUrl?: string;
   stateFile: string;
@@ -72,6 +82,7 @@ interface Config {
   processes?: ProcessConfig;
   system?: SystemConfig;
   actions?: Partial<ActionConfig>;
+  ai?: Partial<AIConfig>;
 }
 
 // Conservative defaults - only safe patterns auto-execute
@@ -196,6 +207,144 @@ function getSecureStateDir(): string {
 }
 
 // ============================================================================
+// AI-Enhanced Diagnosis (optional)
+// ============================================================================
+
+const DEFAULT_AI_CONFIG: AIConfig = {
+  provider: "none",
+};
+
+const AI_MODELS: Record<string, string> = {
+  anthropic: "claude-haiku-4-20250414",
+  openai: "gpt-4o-mini",
+  ollama: "llama3.1:8b",
+};
+
+function buildDiagnosisPrompt(
+  type: string,
+  details: {
+    pid?: string;
+    command?: string;
+    cpu?: number;
+    memoryMB?: number;
+    runtimeHours?: number;
+    swapPercent?: number;
+    healthUrl?: string;
+  }
+): string {
+  return `You are a Linux system administrator diagnosing a production issue. Be concise and specific.
+
+Issue type: ${type}
+${details.pid ? `PID: ${details.pid}` : ""}
+${details.command ? `Process: ${details.command}` : ""}
+${details.cpu ? `CPU usage: ${details.cpu.toFixed(1)}%` : ""}
+${details.memoryMB ? `Memory: ${details.memoryMB.toFixed(0)}MB` : ""}
+${details.runtimeHours ? `Runtime: ${details.runtimeHours.toFixed(1)} hours` : ""}
+${details.swapPercent ? `Swap usage: ${details.swapPercent.toFixed(1)}%` : ""}
+${details.healthUrl ? `Health URL: ${details.healthUrl}` : ""}
+
+Based on the process name and resource usage pattern, provide:
+1. DIAGNOSIS: What's likely happening (1-2 sentences)
+2. ROOT CAUSE: Most probable root cause based on the process type
+3. FIX: The specific command(s) to run, and why
+4. PREVENT: How to prevent recurrence (1 sentence)
+
+Keep your total response under 200 words.`;
+}
+
+async function getAIDiagnosis(
+  aiConfig: AIConfig,
+  type: string,
+  details: Parameters<typeof buildDiagnosisPrompt>[1]
+): Promise<string | null> {
+  const prompt = buildDiagnosisPrompt(type, details);
+
+  try {
+    switch (aiConfig.provider) {
+      case "anthropic": {
+        if (!aiConfig.apiKey) {
+          console.error("  AI: Anthropic API key required (set ai.apiKey or DEFIB_AI_API_KEY)");
+          return null;
+        }
+        const model = aiConfig.model || AI_MODELS.anthropic;
+        const response = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": aiConfig.apiKey,
+            "anthropic-version": "2023-06-01",
+          },
+          body: JSON.stringify({
+            model,
+            max_tokens: 500,
+            messages: [{ role: "user", content: prompt }],
+          }),
+        });
+        if (!response.ok) {
+          console.error(`  AI: Anthropic API error: ${response.status}`);
+          return null;
+        }
+        const data = await response.json() as any;
+        return data.content?.[0]?.text || null;
+      }
+
+      case "openai": {
+        if (!aiConfig.apiKey) {
+          console.error("  AI: OpenAI API key required (set ai.apiKey or DEFIB_AI_API_KEY)");
+          return null;
+        }
+        const model = aiConfig.model || AI_MODELS.openai;
+        const response = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${aiConfig.apiKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            max_tokens: 500,
+            messages: [{ role: "user", content: prompt }],
+          }),
+        });
+        if (!response.ok) {
+          console.error(`  AI: OpenAI API error: ${response.status}`);
+          return null;
+        }
+        const data = await response.json() as any;
+        return data.choices?.[0]?.message?.content || null;
+      }
+
+      case "ollama": {
+        const baseUrl = aiConfig.ollamaUrl || "http://localhost:11434";
+        const model = aiConfig.model || AI_MODELS.ollama;
+        const response = await fetch(`${baseUrl}/api/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model,
+            prompt,
+            stream: false,
+          }),
+        });
+        if (!response.ok) {
+          console.error(`  AI: Ollama error: ${response.status} (is Ollama running?)`);
+          return null;
+        }
+        const data = await response.json() as any;
+        return data.response || null;
+      }
+
+      default:
+        return null;
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : "Unknown error";
+    console.error(`  AI: Diagnosis failed: ${msg}`);
+    return null;
+  }
+}
+
+// ============================================================================
 // Human-Friendly Guidance (for "ask" mode)
 // ============================================================================
 
@@ -305,18 +454,24 @@ function generateGuidance(
   }
 }
 
-function printGuidance(guidance: Guidance): void {
+function printGuidance(guidance: Guidance, aiDiagnosis?: string | null): void {
   console.log(`\n${"=".repeat(60)}`);
   console.log(`🔴 ${guidance.title}`);
   console.log(`${"=".repeat(60)}\n`);
 
   console.log(`${guidance.problem}\n`);
 
-  console.log(`WHY THIS IS A PROBLEM:`);
-  console.log(`${guidance.why}\n`);
+  // AI-enhanced diagnosis replaces the generic "why" and "recommendation"
+  if (aiDiagnosis) {
+    console.log(`AI DIAGNOSIS:`);
+    console.log(`${aiDiagnosis}\n`);
+  } else {
+    console.log(`WHY THIS IS A PROBLEM:`);
+    console.log(`${guidance.why}\n`);
 
-  console.log(`RECOMMENDED FIX:`);
-  console.log(`${guidance.recommendation}\n`);
+    console.log(`RECOMMENDED FIX:`);
+    console.log(`${guidance.recommendation}\n`);
+  }
 
   console.log(`TO FIX, RUN:`);
   console.log(`  ${guidance.fixCommand}\n`);
@@ -576,7 +731,8 @@ async function monitorProcesses(
   config: ProcessConfig,
   webhookUrl: string | undefined,
   state: WatchdogState,
-  actions: ActionConfig = DEFAULT_ACTIONS
+  actions: ActionConfig = DEFAULT_ACTIONS,
+  aiConfig: AIConfig = DEFAULT_AI_CONFIG
 ): Promise<Issue[]> {
   const issues: Issue[] = [];
   const processes = await getProcessList();
@@ -595,14 +751,19 @@ async function monitorProcesses(
       if (actionMode === "auto" && safeToKill) {
         killed = killProcess(proc.pid, proc.command);
       } else if (actionMode === "ask") {
-        // Print human-friendly guidance
-        const guidance = generateGuidance("runaway", {
+        const details = {
           pid: proc.pid,
           command: proc.command,
           cpu: proc.cpu,
           runtimeHours: proc.runtimeHours,
-        });
-        printGuidance(guidance);
+        };
+        // Get AI diagnosis if configured
+        let aiDiagnosis: string | null = null;
+        if (aiConfig.provider !== "none") {
+          aiDiagnosis = await getAIDiagnosis(aiConfig, "runaway_process", details);
+        }
+        const guidance = generateGuidance("runaway", details);
+        printGuidance(guidance, aiDiagnosis);
       }
       // "deny" mode: just alert, no action or guidance
 
@@ -656,13 +817,18 @@ async function monitorProcesses(
 
         // Memory issues always get guidance in ask mode
         if (actions.killUnknown === "ask") {
-          const guidance = generateGuidance("memory", {
+          const memDetails = {
             pid: proc.pid,
             command: proc.command,
             memoryMB: proc.memoryMB,
             runtimeHours: proc.runtimeHours,
-          });
-          printGuidance(guidance);
+          };
+          let aiDiagnosis: string | null = null;
+          if (aiConfig.provider !== "none") {
+            aiDiagnosis = await getAIDiagnosis(aiConfig, "high_memory", memDetails);
+          }
+          const guidance = generateGuidance("memory", memDetails);
+          printGuidance(guidance, aiDiagnosis);
         } else {
           await sendNotification(
             webhookUrl,
@@ -895,14 +1061,24 @@ Action Modes (in config file):
     killSwapHog: ask          - Swap remediation needs human review
     restartForSwap: ask       - Restarting services needs human review
 
+AI-Enhanced Diagnosis (optional, for "ask" mode):
+  --ai <provider>        AI provider: anthropic, openai, ollama, none (default: none)
+  --ai-key <key>         API key for anthropic/openai (or set DEFIB_AI_API_KEY)
+  --ai-model <model>     Model override (default: provider-specific)
+
+  Default models:
+    anthropic: claude-haiku-4-20250414
+    openai:    gpt-4o-mini
+    ollama:    llama3.1:8b
+
 Global Options:
   --webhook <url>        Discord/Slack webhook for notifications
   --config <file>        Load config from JSON file
-  --state-file <path>    State file location (default: /tmp/defib-state.json)
+  --state-file <path>    State file location (default: ~/.local/state/defib/state.json)
   --help                 Show this help
 
 Environment Variables:
-  DEFIB_WEBHOOK_URL, DEFIB_HEALTH_URL, DEFIB_COMPOSE_DIR
+  DEFIB_WEBHOOK_URL, DEFIB_HEALTH_URL, DEFIB_COMPOSE_DIR, DEFIB_AI_API_KEY
 `);
 }
 
@@ -943,6 +1119,10 @@ async function main() {
       "swap-restart-dir": { type: "string" },
       "swap-restart-service": { type: "string" },
       "no-dstate": { type: "boolean" },
+      // AI
+      ai: { type: "string" },
+      "ai-key": { type: "string" },
+      "ai-model": { type: "string" },
     },
     allowPositionals: true,
   });
@@ -967,6 +1147,15 @@ async function main() {
   const actions: ActionConfig = {
     ...DEFAULT_ACTIONS,
     ...fileConfig.actions,
+  };
+
+  // Build AI config from CLI > env > file config > default
+  const aiProvider = (values.ai || fileConfig.ai?.provider || "none") as AIProvider;
+  const aiConfig: AIConfig = {
+    provider: aiProvider,
+    apiKey: values["ai-key"] || process.env.DEFIB_AI_API_KEY || fileConfig.ai?.apiKey,
+    model: values["ai-model"] || fileConfig.ai?.model,
+    ollamaUrl: fileConfig.ai?.ollamaUrl,
   };
 
   // Handle dismiss command
@@ -1041,7 +1230,7 @@ async function main() {
       safeToKillPatterns,
       ignorePatterns,
     };
-    const issues = await monitorProcesses(processConfig, webhookUrl, state, actions);
+    const issues = await monitorProcesses(processConfig, webhookUrl, state, actions, aiConfig);
     allIssues = allIssues.concat(issues);
   }
 
