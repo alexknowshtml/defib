@@ -6,6 +6,8 @@ When your containers stop responding, processes go runaway, or swap pressure thr
 
 Works with **Docker** or **Podman** (auto-detects).
 
+> ⚠️ **Safety First**: defib kills processes and restarts services. Don't run as root. Don't use on multi-user systems. Test patterns before enabling auto-kill. [Full security guide →](#security-considerations)
+
 ## What It Does
 
 | Mode | Detects | Auto-Recovery |
