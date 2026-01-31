@@ -32,13 +32,13 @@ cd defib
 
 ```bash
 # Monitor a container - restart if health check fails
-bun run defib.ts container --health http://localhost:8000/health --compose-dir ./my-app
+bun run defib.ts container --health http://localhost:8000/health --compose-dir /home/deploy/my-app
 
 # Monitor processes - kill runaway worker processes
 bun run defib.ts processes --safe-to-kill "node /app/worker" --ignore "postgres"
 
 # Monitor system - restart app when swap gets critical
-bun run defib.ts system --swap-kill "leaky-app" --swap-restart-dir ./my-app
+bun run defib.ts system --swap-kill "leaky-app" --swap-restart-dir /home/deploy/my-app
 
 # Monitor everything
 bun run defib.ts all --config ./defib.config.json
@@ -53,7 +53,7 @@ Monitors container health via HTTP endpoint. If the endpoint stops responding or
 ```bash
 bun run defib.ts container \
   --health http://localhost:8000/health \
-  --compose-dir ./my-app \
+  --compose-dir /home/deploy/my-app \
   --timeout 10 \
   --max-response 15 \
   --backoff 10 \
@@ -103,7 +103,7 @@ bun run defib.ts system \
   --swap-threshold 80 \
   --swap-kill "electron" \
   --swap-kill "chrome" \
-  --swap-restart-dir ./my-app \
+  --swap-restart-dir /home/deploy/my-app \
   --swap-restart-service web
 ```
 
@@ -214,7 +214,7 @@ For complex setups, use a JSON config file:
 ```json
 {
   "webhookUrl": "https://discord.com/api/webhooks/...",
-  "stateFile": "/tmp/defib-state.json",
+  "stateFile": "~/.local/state/defib/state.json",
   "container": {
     "healthUrl": "http://localhost:8000/health",
     "composeDir": "/path/to/app",
@@ -359,6 +359,16 @@ defib maintains state in `~/.local/state/defib/state.json` (configurable via `--
 3. Start with `actions.killUnknown: "deny"` and review alerts before enabling auto-kill
 4. Keep config files readable only by the user running defib
 5. Use specific patterns like `"node /app/worker.js"` rather than broad ones like `"worker"`
+
+## Running Tests
+
+defib has an integration test suite that verifies security validations, monitoring, and container health detection.
+
+```bash
+cd test && ./run-tests.sh
+```
+
+Tests auto-detect Docker or Podman. Container tests require a working compose setup; they're marked optional and skipped gracefully if unavailable.
 
 ## Why "defib"?
 

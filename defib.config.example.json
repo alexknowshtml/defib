@@ -1,6 +1,6 @@
 {
   "webhookUrl": "https://discord.com/api/webhooks/YOUR_WEBHOOK_HERE",
-  "stateFile": "/tmp/defib-state.json",
+  "stateFile": "~/.local/state/defib/state.json",
   "actions": {
     "restartContainer": "auto",
     "killRunaway": "auto",
