@@ -156,6 +156,46 @@ function getIssueKey(issue: Issue): string {
 }
 
 // ============================================================================
+// Security Validations
+// ============================================================================
+
+function validatePatterns(patterns: string[], name: string): void {
+  for (const pattern of patterns) {
+    // Reject empty or too-short patterns that would match everything
+    if (!pattern || pattern.length < 3) {
+      throw new Error(`Invalid ${name} pattern: "${pattern}" - patterns must be at least 3 characters`);
+    }
+    // Reject patterns that are just wildcards or common substrings
+    const dangerous = [".", "..", "/", "\\", " ", "node", "python", "bash", "sh"];
+    if (dangerous.includes(pattern.toLowerCase())) {
+      throw new Error(`Dangerous ${name} pattern: "${pattern}" - too broad, could match critical processes`);
+    }
+  }
+}
+
+function validatePath(path: string, name: string): void {
+  // Reject paths with shell metacharacters
+  const dangerous = /[;&|`$(){}[\]<>!#*?~]/;
+  if (dangerous.test(path)) {
+    throw new Error(`Invalid ${name}: "${path}" - contains shell metacharacters`);
+  }
+  // Must be absolute path
+  if (!path.startsWith("/")) {
+    throw new Error(`Invalid ${name}: "${path}" - must be an absolute path`);
+  }
+}
+
+function getSecureStateDir(): string {
+  // Use XDG_STATE_HOME or fall back to ~/.local/state
+  const xdgState = process.env.XDG_STATE_HOME;
+  if (xdgState) return `${xdgState}/defib`;
+  const home = process.env.HOME;
+  if (home) return `${home}/.local/state/defib`;
+  // Last resort: /tmp with user-specific dir
+  return `/tmp/defib-${process.getuid?.() || 'unknown'}`;
+}
+
+// ============================================================================
 // Human-Friendly Guidance (for "ask" mode)
 // ============================================================================
 
@@ -315,7 +355,22 @@ async function loadState(stateFile: string): Promise<WatchdogState> {
 }
 
 async function saveState(stateFile: string, state: WatchdogState): Promise<void> {
+  // Ensure directory exists
+  const dir = stateFile.substring(0, stateFile.lastIndexOf('/'));
+  if (dir) {
+    try {
+      await $`mkdir -p ${dir} && chmod 700 ${dir}`.quiet();
+    } catch {
+      // Directory might already exist
+    }
+  }
   await Bun.write(stateFile, JSON.stringify(state, null, 2));
+  // Set restrictive permissions on state file (owner-only read/write)
+  try {
+    await $`chmod 600 ${stateFile}`.quiet();
+  } catch {
+    // May fail on some systems, not critical
+  }
 }
 
 // ============================================================================
@@ -902,7 +957,8 @@ async function main() {
   }
 
   const webhookUrl = values.webhook || process.env.DEFIB_WEBHOOK_URL || fileConfig.webhookUrl;
-  const stateFile = values["state-file"] || fileConfig.stateFile || "/tmp/defib-state.json";
+  const defaultStateFile = `${getSecureStateDir()}/state.json`;
+  const stateFile = values["state-file"] || fileConfig.stateFile || defaultStateFile;
 
   const state = await loadState(stateFile);
   const now = Date.now();
@@ -951,6 +1007,8 @@ async function main() {
         process.exit(1);
       }
     } else {
+      // Validate composeDir path
+      validatePath(composeDir, "compose-dir");
       const runtime = await detectRuntime();
       const containerConfig: ContainerConfig = {
         healthUrl,
@@ -968,12 +1026,20 @@ async function main() {
   }
 
   if (command === "processes" || command === "all") {
+    const safeToKillPatterns = values["safe-to-kill"] || fileConfig.processes?.safeToKillPatterns || [];
+    const ignorePatterns = values.ignore || fileConfig.processes?.ignorePatterns || [];
+
+    // Validate patterns to prevent overly broad matches
+    if (safeToKillPatterns.length > 0) {
+      validatePatterns(safeToKillPatterns, "safe-to-kill");
+    }
+
     const processConfig: ProcessConfig = {
       cpuThreshold: parseInt(values["cpu-threshold"] || "") || fileConfig.processes?.cpuThreshold || 80,
       memoryThresholdMB: parseInt(values["memory-threshold"] || "") || fileConfig.processes?.memoryThresholdMB || 2000,
       maxRuntimeHours: parseInt(values["max-runtime"] || "") || fileConfig.processes?.maxRuntimeHours || 2,
-      safeToKillPatterns: values["safe-to-kill"] || fileConfig.processes?.safeToKillPatterns || [],
-      ignorePatterns: values.ignore || fileConfig.processes?.ignorePatterns || [],
+      safeToKillPatterns,
+      ignorePatterns,
     };
     const issues = await monitorProcesses(processConfig, webhookUrl, state, actions);
     allIssues = allIssues.concat(issues);
@@ -987,10 +1053,20 @@ async function main() {
       runtime = await detectRuntime();
     }
 
+    const swapKillPatterns = values["swap-kill"] || fileConfig.system?.swapKillPatterns || [];
+
+    // Validate patterns and paths
+    if (swapKillPatterns.length > 0) {
+      validatePatterns(swapKillPatterns, "swap-kill");
+    }
+    if (swapRestartDir) {
+      validatePath(swapRestartDir, "swap-restart-dir");
+    }
+
     const systemConfig: SystemConfig = {
       swapThreshold: parseInt(values["swap-threshold"] || "") || fileConfig.system?.swapThreshold || 80,
       checkDState: !values["no-dstate"] && (fileConfig.system?.checkDState !== false),
-      swapKillPatterns: values["swap-kill"] || fileConfig.system?.swapKillPatterns || [],
+      swapKillPatterns,
       swapRestartCompose: swapRestartDir ? {
         composeDir: swapRestartDir,
         serviceName: values["swap-restart-service"] || fileConfig.system?.swapRestartCompose?.serviceName,

@@ -32,8 +32,8 @@ cd defib
 # Monitor a container - restart if health check fails
 bun run defib.ts container --health http://localhost:8000/health --compose-dir ./my-app
 
-# Monitor processes - kill runaway node processes
-bun run defib.ts processes --safe-to-kill "node" --ignore "postgres"
+# Monitor processes - kill runaway worker processes
+bun run defib.ts processes --safe-to-kill "node /app/worker" --ignore "postgres"
 
 # Monitor system - restart app when swap gets critical
 bun run defib.ts system --swap-kill "leaky-app" --swap-restart-dir ./my-app
@@ -322,11 +322,41 @@ Supports Discord and Slack webhooks. Notifications include:
 
 ## State Persistence
 
-defib maintains state in `/tmp/defib-state.json` (configurable):
+defib maintains state in `~/.local/state/defib/state.json` (configurable via `--state-file`):
 
 - Tracks restart backoff timers
 - Remembers known issues to avoid duplicate alerts
 - Cleans up resolved issues automatically
+- State directory and file are created with restrictive permissions (700/600)
+
+## Security Considerations
+
+**defib kills processes and restarts services. Use with care.**
+
+### Built-in Protections
+
+1. **Pattern validation** - Patterns must be at least 3 characters and cannot be common dangerous terms like "node", "python", "bash", or ".". This prevents accidentally matching all processes.
+
+2. **Path validation** - Compose directory paths must be absolute and cannot contain shell metacharacters (`; & | $ \`` etc).
+
+3. **Secure state file** - State is stored in `~/.local/state/defib/` with owner-only permissions (not world-readable `/tmp`).
+
+4. **Conservative defaults** - Only `restartContainer` and `killRunaway` (for explicit safe-to-kill patterns) are set to "auto". Everything else requires human review.
+
+### When NOT to Use defib
+
+- **Multi-user systems** - Other users could potentially exploit the process-killing behavior
+- **As root** - defib can kill any process on the system when run as root
+- **With untrusted config files** - Config files can specify patterns and paths
+- **Without testing patterns first** - Always verify patterns match only what you intend
+
+### Best Practices
+
+1. Run as a dedicated non-root user with minimal privileges
+2. Test patterns with `--ignore` (detection-only) before enabling `--safe-to-kill`
+3. Start with `actions.killUnknown: "deny"` and review alerts before enabling auto-kill
+4. Keep config files readable only by the user running defib
+5. Use specific patterns like `"node /app/worker.js"` rather than broad ones like `"worker"`
 
 ## Why "defib"?
 
